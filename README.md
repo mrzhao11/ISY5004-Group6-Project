@@ -1,11 +1,28 @@
 # Pedestrian Sensing Project
 
-A demo-ready baseline for Group 6:
+This project provides a demo-ready two-stage intelligent sensing system for pedestrian behavior understanding and crossing risk prediction in driving scenarios.
 
-- Stage 1: Pedestrian detection + temporal behavior understanding (YOLO + CNN/LSTM integration point)
-- Stage 2: Crossing intention and risk prediction (XGBoost integration point)
-- English frontend dashboard with pipeline status and risk output
-- Dockerized environment for one-command startup
+The current version is designed for direct team use:
+
+- Stage 1 focuses on perception and temporal behavior understanding (YOLO + CNN/LSTM integration point).
+- Stage 2 focuses on crossing-intention and risk estimation (XGBoost integration point).
+- The frontend dashboard presents pipeline status, key outputs, and operational guidance in English.
+- The backend exposes clear API contracts for integration with data preprocessing, model inference, and evaluation modules.
+- Docker-based startup is included for consistent team deployment across machines.
+
+## Project Overview
+
+The system targets safety-critical pedestrian interactions in urban traffic. Instead of only detecting pedestrian location, it models behavior over time and estimates crossing probability to support proactive driving decisions.
+
+Input:
+- Video sequence path
+- Pedestrian ID
+- Optional scene-context flag
+
+Output:
+- Behavior label and confidence
+- Crossing probability and risk level
+- Feature-level summary for quick interpretation
 
 ## Project Structure
 
@@ -75,23 +92,6 @@ Equivalent command:
 
 ```bash
 docker compose down
-```
-
-## Local Startup (Without Docker)
-
-```bash
-cd pedestrian_sensing
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn backend.api:app --reload --port 8000
-```
-
-Open frontend (new terminal):
-
-```bash
-cd pedestrian_sensing/frontend
-python3 -m http.server 8080
 ```
 
 ## API Endpoints
