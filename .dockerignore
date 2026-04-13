@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.git/
+outputs/logs/*
+outputs/predictions/*
+data/raw/*
+data/processed/*

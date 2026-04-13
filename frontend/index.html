@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pedestrian Crossing Risk Dashboard</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-layer" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand-block">
+        <p class="brand">Pedestrian Intelligence</p>
+        <p class="subtitle">Crossing Risk Monitoring</p>
+      </div>
+      <div class="pill">Live Demo</div>
+    </header>
+
+    <main class="layout">
+      <section class="hero card">
+        <div>
+          <p class="eyebrow">Two-Stage Decision Pipeline</p>
+          <h1>Pedestrian Behavior and Crossing Risk Dashboard</h1>
+          <p>
+            Analyze video sequences, interpret pedestrian behavior, and estimate crossing risk to support
+            safety-aware driving decisions.
+          </p>
+        </div>
+        <div class="hero-metrics">
+          <div>
+            <span>System Mode</span>
+            <strong>Online Inference</strong>
+          </div>
+          <div>
+            <span>Target</span>
+            <strong>Pedestrian-Level Risk</strong>
+          </div>
+          <div>
+            <span>Output</span>
+            <strong>Risk Probability + Alert Level</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="controls card">
+        <h2>Inference Input</h2>
+        <form id="analyzeForm">
+          <label for="videoPath">Video Path</label>
+          <input id="videoPath" name="videoPath" type="text" value="/data/raw/sample_clip.mp4" required />
+
+          <label for="pedestrianId">Pedestrian ID</label>
+          <input id="pedestrianId" name="pedestrianId" type="text" value="ped_001" />
+
+          <label class="switch-row" for="includeContext">
+            <input id="includeContext" name="includeContext" type="checkbox" checked />
+            Use traffic context features
+          </label>
+
+          <button type="submit">Run Analysis</button>
+        </form>
+      </section>
+
+      <section class="pipeline card">
+        <h2>Pipeline Status</h2>
+        <div class="stage-grid">
+          <article>
+            <h3>Stage 1</h3>
+            <p>Detection + Temporal Behavior Recognition</p>
+            <span id="stage1Status" class="status waiting">Waiting</span>
+          </article>
+          <article>
+            <h3>Stage 2</h3>
+            <p>Feature Fusion + Risk Estimation</p>
+            <span id="stage2Status" class="status waiting">Waiting</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="results card" id="resultsPanel">
+        <h2>Current Assessment</h2>
+        <p class="muted">Run analysis to generate the latest pedestrian risk assessment.</p>
+      </section>
+
+      <section class="actions card">
+        <h2>Operational Guidance</h2>
+        <ul>
+          <li>High risk: Prepare braking and reduce speed.</li>
+          <li>Medium risk: Keep safe distance and monitor pedestrian intent.</li>
+          <li>Low risk: Continue tracking with normal caution.</li>
+          <li>Always validate predictions with scene-level context.</li>
+        </ul>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
