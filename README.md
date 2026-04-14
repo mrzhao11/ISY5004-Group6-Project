@@ -116,3 +116,32 @@ Request example:
 3. Upload your team dataset under `data/raw` and connect preprocessing outputs into `data/processed`.
 4. Add experiment scripts for Accuracy, F1, AUC, and mAP.
 5. Save trained artifacts into `models/stage1` and `models/stage2`.
+
+## JAAD Preprocessing Workflow
+
+The repository now includes a dedicated A-stage preprocessing pipeline for JAAD data preparation.
+
+Primary script:
+
+```bash
+python scripts/prepare_jaad.py --raw-dir data/raw/jaad --processed-dir data/processed/jaad
+```
+
+Generated outputs:
+
+- `data/processed/jaad/cleaned_metadata.csv`
+- `data/processed/jaad/cleaned_sequences_manifest.csv`
+- `data/processed/jaad/tracks/*.csv`
+- `data/processed/jaad/trajectory_features.csv`
+- `data/processed/jaad/sequence_index.json`
+- `data/processed/jaad/data_dictionary.json`
+- `data/processed/jaad/crops/<sequence_id>/`
+
+Mock-data smoke test:
+
+```bash
+python scripts/create_mock_jaad.py
+python scripts/prepare_jaad.py --raw-dir data/raw/mock_jaad --processed-dir data/processed/mock_jaad --window-size 8 --stride 4
+```
+
+See `docs/jaad_data_pipeline.md` for the raw-data layout and handoff contract used by A/B/C/D.
