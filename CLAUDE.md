@@ -185,34 +185,85 @@ docker logs pedestrian_triton 2>&1 | grep -i error
 
 ## How B and C Plug In Their Real Models
 
-Both members only need to edit one file each.
-Tensor shapes and the ensemble config stay the same.
+Both `model.py` files **auto-detect** which model file is present and load accordingly.
+No code changes needed — just drop the weight file into the right directory.
 
-**B replaces Stage 1:**
+### Stage 1 (B) — priority order
+
+| File to place | Format | How loaded |
+|---|---|---|
+| `stage1_behavior/1/model.onnx` | ONNX | onnxruntime — fastest, use for benchmarking |
+| `stage1_behavior/1/model.pt`   | PyTorch | `torch.load` + `model.eval()` |
+| (neither) | — | numpy simulation, smoke-test mode |
+
+**Export from PyTorch training:**
 ```python
-# triton/model_repository/stage1_behavior/1/model.py
-# In execute(), replace the simulation block with:
-logits = your_video_swin_model(clip)          # or CNN+LSTM
-behavior_probs = softmax(logits)
-behavior_embedding = your_backbone.features   # 256-dim
+# .pt
+torch.save(model.state_dict(), "model.pt")
+
+# .onnx
+dummy = torch.zeros(1, 16, 3, 224, 224)   # NCTHW
+torch.onnx.export(model, dummy, "model.onnx",
+    input_names=["ped_clip"],
+    output_names=["behavior_probs", "behavior_embedding"],
+    dynamic_axes={"ped_clip": {0: "batch"}})
 ```
 
-**C replaces Stage 2:**
+ONNX model must output tensors named exactly `behavior_probs` and `behavior_embedding`.
+
+### Stage 2 (C) — priority order
+
+| File to place | Format | How loaded |
+|---|---|---|
+| `stage2_crossing/1/model.onnx` | ONNX | onnxruntime — fastest |
+| `stage2_crossing/1/model.ubj`  | XGBoost binary | `xgb.Booster().load_model()` |
+| `stage2_crossing/1/model.pt`   | PyTorch (TCL) | `torch.load` + `model.eval()` |
+| (none) | — | numpy simulation |
+
+**Export from XGBoost:**
 ```python
-# triton/model_repository/stage2_crossing/1/model.py
-# In execute(), replace the fusion block with:
-features = np.concatenate([traj.reshape(B,-1), b_prob, b_emb, ctx, veh], axis=1)
-crossing_prob = your_xgboost_or_tcl_model.predict(features)
+model.save_model("model.ubj")
 ```
 
-If C uses a saved XGBoost model file, load it in `initialize()`:
+**Export XGBoost → ONNX (for benchmarking):**
 ```python
-def initialize(self, args):
-    import xgboost as xgb, json
-    model_dir = args["model_repository"] + "/" + args["model_version"]
-    self.model = xgb.Booster()
-    self.model.load_model(model_dir + "/model.ubj")
+from onnxmltools import convert_xgboost
+from onnxmltools.convert.common.data_types import FloatTensorType
+onnx_model = convert_xgboost(model, initial_types=[("features", FloatTensorType([None, 366]))])
+with open("model.onnx", "wb") as f:
+    f.write(onnx_model.SerializeToString())
 ```
+
+ONNX model must accept input named `features` with shape `[B, 366]`
+(= traj 96 + behavior_probs 4 + behavior_embedding 256 + context 6 + vehicle 4).
+
+### Verifying after dropping in a model file
+
+Restart Triton and re-run the smoke test — the log line will confirm which mode loaded:
+```
+stage1_behavior: loaded ONNX model       ← or "loaded PyTorch model" / "simulation mode"
+stage2_crossing: loaded XGBoost model
+```
+
+---
+
+## Latency Benchmarking (for report)
+
+Run the same test script against three configurations to produce comparable numbers:
+
+```bash
+# Config 1: simulation (baseline, already done)
+python3 triton/client/test_inference.py --url localhost:8001 --batch 2 --runs 50
+
+# Config 2: real models, Python backend (.pt / .ubj)
+# Drop model files → restart Triton → run same command
+
+# Config 3: real models, ONNX backend (.onnx)
+# Drop .onnx files → restart Triton → run same command
+```
+
+The `--runs` flag controls how many iterations the latency benchmark averages over.
+Compare p50 and p95 across configs in the report.
 
 ---
 
