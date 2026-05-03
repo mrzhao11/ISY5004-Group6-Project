@@ -1,0 +1,21 @@
+{
+  "input_seq_len": 30,
+  "input_dim": 2,
+  "output_names": [
+    "logits",
+    "embedding",
+    "probabilities"
+  ],
+  "opset_version": 14,
+  "behavior_classes": [
+    "walking",
+    "standing",
+    "looking",
+    "crossing"
+  ],
+  "target_length": 32,
+  "dynamic_axes": {
+    "batch_size": "variable",
+    "sequence_length": "variable"
+  }
+}
