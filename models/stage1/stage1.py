@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Tuple, Optional, Union
@@ -8,6 +10,9 @@ import json
 import os
 import warnings
 from pathlib import Path
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import classification_report, accuracy_score, precision_score, recall_score, f1_score, average_precision_score, confusion_matrix, roc_auc_score
+from tqdm import tqdm
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -16,44 +21,50 @@ warnings.filterwarnings('ignore', category=UserWarning)
 class Stage1Output:
     """Stage 1 output data format"""
     sequence_id: str
-    behavior_label: str
+    action_label: str
+    look_label: str
     behavior_embedding: List[float]
-    behavior_probabilities: Dict[str, float]
+    action_probabilities: Dict[str, float]
+    look_probabilities: Dict[str, float]
     
     def to_dict(self) -> Dict:
         return {
             "sequence_id": self.sequence_id,
-            "behavior_label": self.behavior_label,
+            "action_label": self.action_label,
+            "look_label": self.look_label,
             "behavior_embedding": self.behavior_embedding,
-            "behavior_probabilities": self.behavior_probabilities
+            "action_probabilities": self.action_probabilities,
+            "look_probabilities": self.look_probabilities
         }
     
     def to_csv_row(self) -> List:
         return [
             self.sequence_id,
-            self.behavior_label,
+            self.action_label,
+            self.look_label,
             json.dumps(self.behavior_embedding),
-            json.dumps(self.behavior_probabilities)
+            json.dumps(self.action_probabilities),
+            json.dumps(self.look_probabilities)
         ]
 
 
-class CNNLSTMBehaviorRecognizer(nn.Module):
-    """CNN + LSTM behavior recognition model"""
+class MultiTaskBehaviorRecognizer(nn.Module):
+    """Multi-task model for predicting both action and look behavior"""
     
     def __init__(
         self,
         input_dim: int = 2,
         hidden_dim: int = 128,
         num_layers: int = 2,
-        num_classes: int = 4,
+        num_action_classes: int = 2,
+        num_look_classes: int = 2,
         embedding_dim: int = 64,
         target_length: int = 32
     ):
-        super(CNNLSTMBehaviorRecognizer, self).__init__()
+        super(MultiTaskBehaviorRecognizer, self).__init__()
         
         self.target_length = target_length
         
-        # CNN layers for spatial feature extraction
         self.cnn = nn.Sequential(
             nn.Conv1d(input_dim, 32, kernel_size=3, padding=1),
             nn.ReLU(),
@@ -62,7 +73,6 @@ class CNNLSTMBehaviorRecognizer(nn.Module):
             nn.ReLU(),
         )
         
-        # LSTM layers for temporal modeling
         self.lstm = nn.LSTM(
             input_size=64,
             hidden_size=hidden_dim,
@@ -71,76 +81,95 @@ class CNNLSTMBehaviorRecognizer(nn.Module):
             dropout=0.3 if num_layers > 1 else 0
         )
         
-        # Classification head
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_dim, 64),
+        self.shared_fc = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(64, num_classes)
+            nn.Dropout(0.3)
         )
         
-        # Embedding projection for downstream tasks
-        self.embedding_proj = nn.Linear(hidden_dim, embedding_dim)
-        self.behavior_classes = ['walking', 'standing', 'looking', 'stopped']
+        self.action_classifier = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_action_classes)
+        )
+        
+        self.look_classifier = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(64, num_look_classes)
+        )
+        
+        self.embedding_proj = nn.Linear(128, embedding_dim)
+        
+        self.action_classes = ['standing', 'walking']
+        self.look_classes = ['not-looking', 'looking']
     
     def _adaptive_pool_1d(self, x: torch.Tensor, target_length: int) -> torch.Tensor:
-        """Adaptive pooling using interpolation for ONNX compatibility"""
         return nn.functional.interpolate(
             x, size=target_length, mode='linear', align_corners=False
         )
     
-    def forward(self, trajectory: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass with dynamic sequence length support"""
+    def forward(self, trajectory: torch.Tensor):
         batch_size, seq_len, input_dim = trajectory.shape
         
-        # CNN processing
         cnn_input = trajectory.permute(0, 2, 1)
         cnn_features = self.cnn(cnn_input)
         
-        # Adaptive pooling to fixed length
         current_length = cnn_features.shape[2]
         if current_length != self.target_length:
             cnn_features = self._adaptive_pool_1d(cnn_features, self.target_length)
         
-        # LSTM processing
         lstm_input = cnn_features.permute(0, 2, 1)
         lstm_out, _ = self.lstm(lstm_input)
         
-        # Take last hidden state
         last_hidden = lstm_out[:, -1, :]
+        shared_features = self.shared_fc(last_hidden)
         
-        # Outputs
-        logits = self.classifier(last_hidden)
-        probabilities = torch.softmax(logits, dim=-1)
-        embedding = self.embedding_proj(last_hidden)
+        action_logits = self.action_classifier(shared_features)
+        look_logits = self.look_classifier(shared_features)
         
-        return logits, embedding, probabilities
+        action_probs = torch.softmax(action_logits, dim=-1)
+        look_probs = torch.softmax(look_logits, dim=-1)
+        
+        embedding = self.embedding_proj(shared_features)
+        
+        return action_logits, look_logits, embedding, action_probs, look_probs
     
     def predict(self, trajectory: np.ndarray, sequence_id: str) -> Stage1Output:
-        """Predict behavior for a single trajectory"""
         self.eval()
         trajectory_tensor = torch.FloatTensor(trajectory).unsqueeze(0)
         
         with torch.no_grad():
-            logits, embedding, probabilities = self.forward(trajectory_tensor)
+            action_logits, look_logits, embedding, action_probs, look_probs = self.forward(trajectory_tensor)
         
-        pred_class_idx = torch.argmax(logits, dim=-1).item()
-        behavior_label = self.behavior_classes[pred_class_idx]
+        action_pred_idx = torch.argmax(action_logits, dim=-1).item()
+        look_pred_idx = torch.argmax(look_logits, dim=-1).item()
         
-        probs_dict = {
-            self.behavior_classes[i]: probabilities[0][i].item()
-            for i in range(len(self.behavior_classes))
+        action_label = self.action_classes[action_pred_idx]
+        look_label = self.look_classes[look_pred_idx]
+        
+        action_probs_dict = {
+            self.action_classes[i]: action_probs[0][i].item()
+            for i in range(len(self.action_classes))
+        }
+        
+        look_probs_dict = {
+            self.look_classes[i]: look_probs[0][i].item()
+            for i in range(len(self.look_classes))
         }
         
         return Stage1Output(
             sequence_id=sequence_id,
-            behavior_label=behavior_label,
+            action_label=action_label,
+            look_label=look_label,
             behavior_embedding=embedding[0].tolist(),
-            behavior_probabilities=probs_dict
+            action_probabilities=action_probs_dict,
+            look_probabilities=look_probs_dict
         )
     
     def save_pt(self, filepath: str, metadata: Optional[Dict] = None):
-        """Save PyTorch model"""
         os.makedirs(os.path.dirname(filepath) if os.path.dirname(filepath) else '.', exist_ok=True)
         
         save_dict = {
@@ -149,9 +178,11 @@ class CNNLSTMBehaviorRecognizer(nn.Module):
                 'input_dim': self.cnn[0].in_channels,
                 'hidden_dim': self.lstm.hidden_size,
                 'num_layers': self.lstm.num_layers,
-                'num_classes': self.classifier[-1].out_features,
+                'num_action_classes': self.action_classifier[-1].out_features,
+                'num_look_classes': self.look_classifier[-1].out_features,
                 'embedding_dim': self.embedding_proj.out_features,
-                'behavior_classes': self.behavior_classes,
+                'action_classes': self.action_classes,
+                'look_classes': self.look_classes,
                 'target_length': self.target_length
             },
             'model_class': self.__class__.__name__
@@ -165,14 +196,14 @@ class CNNLSTMBehaviorRecognizer(nn.Module):
     
     @classmethod
     def load_pt(cls, filepath: str, device: str = 'cpu'):
-        """Load PyTorch model"""
         checkpoint = torch.load(filepath, map_location=device)
         config = checkpoint['model_config']
         model = cls(
             input_dim=config['input_dim'],
             hidden_dim=config['hidden_dim'],
             num_layers=config['num_layers'],
-            num_classes=config['num_classes'],
+            num_action_classes=config['num_action_classes'],
+            num_look_classes=config['num_look_classes'],
             embedding_dim=config['embedding_dim'],
             target_length=config.get('target_length', 32)
         )
@@ -184,636 +215,600 @@ class CNNLSTMBehaviorRecognizer(nn.Module):
         return model, metadata
 
 
-class JAADDataLoader:
-    """JAAD dataset loader - adapted for your data format"""
+def calculate_metrics(y_true, y_pred, y_prob, class_names):
+    metrics = {}
     
-    def __init__(self, data_path: str):
-        """
-        Args:
-            data_path: Root data directory (e.g., 'data/processed/jaad/' or 'data/processed/mock_jaad/')
-        """
-        self.data_path = Path(data_path)
+    if not isinstance(y_true, np.ndarray):
+        y_true = np.array(y_true)
+    if not isinstance(y_pred, np.ndarray):
+        y_pred = np.array(y_pred)
+    
+    metrics['accuracy'] = accuracy_score(y_true, y_pred)
+    metrics['precision'] = precision_score(y_true, y_pred, average='weighted', zero_division=0)
+    metrics['recall'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
+    metrics['f1_macro'] = f1_score(y_true, y_pred, average='macro', zero_division=0)
+    metrics['f1_weighted'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
+    
+    if len(class_names) == 2 and y_prob is not None:
+        positive_idx = 1
+        y_prob_positive = y_prob[:, positive_idx]
+        try:
+            metrics['roc_auc'] = roc_auc_score(y_true == class_names[positive_idx], y_prob_positive)
+        except:
+            metrics['roc_auc'] = 0.0
+    
+    metrics['per_class'] = {}
+    for i, class_name in enumerate(class_names):
+        y_true_binary = (y_true == class_name).astype(int)
+        y_pred_binary = (y_pred == class_name).astype(int)
         
-        # Load three core files
-        self.metadata = pd.read_csv(self.data_path / 'cleaned_metadata.csv')
-        self.sequences_manifest = pd.read_csv(self.data_path / 'cleaned_sequences_manifest.csv')
-        self.trajectory_features = pd.read_csv(self.data_path / 'trajectory_features.csv')
+        tp = np.sum((y_true_binary == 1) & (y_pred_binary == 1))
+        fp = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
+        fn = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
         
-        print(f"✓ Loaded JAAD dataset from {data_path}")
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+        
+        if y_prob is not None and len(y_prob) > 0 and i < y_prob.shape[1]:
+            ap = average_precision_score(y_true_binary, y_prob[:, i])
+        else:
+            ap = 0.0
+        
+        metrics['per_class'][class_name] = {
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1,
+            'average_precision': ap,
+            'support': int(np.sum(y_true_binary))
+        }
+    
+    if y_prob is not None and y_prob.size > 0:
+        metrics['mAP'] = np.mean([metrics['per_class'][c]['average_precision'] for c in class_names])
+    else:
+        metrics['mAP'] = 0.0
+    
+    return metrics
+
+
+def evaluate_model(model, val_loader, device='cpu'):
+    model.eval()
+    
+    all_action_preds = []
+    all_action_labels = []
+    all_action_probs = []
+    all_look_preds = []
+    all_look_labels = []
+    all_look_probs = []
+    
+    with torch.no_grad():
+        for batch_x, batch_action_y, batch_look_y in tqdm(val_loader, desc="  Evaluating", leave=False):
+            batch_x = batch_x.to(device)
+            batch_action_y = batch_action_y.to(device)
+            batch_look_y = batch_look_y.to(device)
+            
+            action_logits, look_logits, _, action_probs, look_probs = model(batch_x)
+            
+            _, action_predicted = torch.max(action_logits, 1)
+            _, look_predicted = torch.max(look_logits, 1)
+            
+            all_action_preds.extend(action_predicted.cpu().numpy())
+            all_action_labels.extend(batch_action_y.cpu().numpy())
+            all_action_probs.extend(action_probs.cpu().numpy())
+            
+            all_look_preds.extend(look_predicted.cpu().numpy())
+            all_look_labels.extend(batch_look_y.cpu().numpy())
+            all_look_probs.extend(look_probs.cpu().numpy())
+    
+    all_action_preds = np.array(all_action_preds)
+    all_action_labels = np.array(all_action_labels)
+    all_action_probs = np.array(all_action_probs) if len(all_action_probs) > 0 else None
+    
+    all_look_preds = np.array(all_look_preds)
+    all_look_labels = np.array(all_look_labels)
+    all_look_probs = np.array(all_look_probs) if len(all_look_probs) > 0 else None
+    
+    action_label_to_name = {i: name for i, name in enumerate(model.action_classes)}
+    look_label_to_name = {i: name for i, name in enumerate(model.look_classes)}
+    
+    y_true_action_names = [action_label_to_name[label] for label in all_action_labels]
+    y_pred_action_names = [action_label_to_name[pred] for pred in all_action_preds]
+    
+    y_true_look_names = [look_label_to_name[label] for label in all_look_labels]
+    y_pred_look_names = [look_label_to_name[pred] for pred in all_look_preds]
+    
+    action_metrics = calculate_metrics(y_true_action_names, y_pred_action_names, all_action_probs, model.action_classes)
+    look_metrics = calculate_metrics(y_true_look_names, y_pred_look_names, all_look_probs, model.look_classes)
+    
+    print(f"\n  Action Classification Confusion Matrix:")
+    cm_action = confusion_matrix(all_action_labels, all_action_preds, labels=range(len(model.action_classes)))
+    print("  " + " " * 15 + "".join([f"{model.action_classes[j][:10]:>12}" for j in range(cm_action.shape[1])]))
+    for i in range(cm_action.shape[0]):
+        print(f"  {model.action_classes[i][:12]:<12} " + "".join([f"{cm_action[i][j]:>12d}" for j in range(cm_action.shape[1])]))
+    
+    print(f"\n  Look Classification Confusion Matrix:")
+    cm_look = confusion_matrix(all_look_labels, all_look_preds, labels=range(len(model.look_classes)))
+    print("  " + " " * 15 + "".join([f"{model.look_classes[j][:10]:>12}" for j in range(cm_look.shape[1])]))
+    for i in range(cm_look.shape[0]):
+        print(f"  {model.look_classes[i][:12]:<12} " + "".join([f"{cm_look[i][j]:>12d}" for j in range(cm_look.shape[1])]))
+    
+    return action_metrics, look_metrics
+
+
+def print_metrics_table(action_metrics, look_metrics, model, title="Evaluation Metrics"):
+    print("\n" + "=" * 80)
+    print(f"{title:^80}")
+    print("=" * 80)
+    
+    print(f"\n📊 ACTION CLASSIFICATION (Walking vs Standing):")
+    print("-" * 40)
+    print(f"  Accuracy:           {action_metrics['accuracy']:.4f} ({action_metrics['accuracy']*100:.2f}%)")
+    print(f"  Weighted Precision: {action_metrics['precision']:.4f}")
+    print(f"  Weighted Recall:    {action_metrics['recall']:.4f}")
+    print(f"  Weighted F1-Score:  {action_metrics['f1_weighted']:.4f}")
+    print(f"  Macro F1-Score:     {action_metrics['f1_macro']:.4f}")
+    if 'roc_auc' in action_metrics:
+        print(f"  ROC-AUC:            {action_metrics['roc_auc']:.4f}")
+    
+    print(f"\n  Per-Class Metrics:")
+    print("  " + "-" * 60)
+    print(f"  {'Class':<12} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'Support':<10}")
+    for class_name in model.action_classes:
+        class_metrics = action_metrics['per_class'][class_name]
+        print(f"  {class_name:<12} {class_metrics['precision']:.4f}     {class_metrics['recall']:.4f}     {class_metrics['f1_score']:.4f}     {class_metrics['support']:<10}")
+    
+    print(f"\n📊 LOOK CLASSIFICATION (Looking vs Not-looking):")
+    print("-" * 40)
+    print(f"  Accuracy:           {look_metrics['accuracy']:.4f} ({look_metrics['accuracy']*100:.2f}%)")
+    print(f"  Weighted Precision: {look_metrics['precision']:.4f}")
+    print(f"  Weighted Recall:    {look_metrics['recall']:.4f}")
+    print(f"  Weighted F1-Score:  {look_metrics['f1_weighted']:.4f}")
+    print(f"  Macro F1-Score:     {look_metrics['f1_macro']:.4f}")
+    if 'roc_auc' in look_metrics:
+        print(f"  ROC-AUC:            {look_metrics['roc_auc']:.4f}")
+    
+    print(f"\n  Per-Class Metrics:")
+    print("  " + "-" * 60)
+    print(f"  {'Class':<12} {'Precision':<10} {'Recall':<10} {'F1-Score':<10} {'Support':<10}")
+    for class_name in model.look_classes:
+        class_metrics = look_metrics['per_class'][class_name]
+        print(f"  {class_name:<12} {class_metrics['precision']:.4f}     {class_metrics['recall']:.4f}     {class_metrics['f1_score']:.4f}     {class_metrics['support']:<10}")
+    
+    print("=" * 80)
+
+
+class JAADDataLoader:
+    """JAAD dataset loader for multi-task learning"""
+    
+    def __init__(self, metadata_path: str, manifest_path: str):
+        self.metadata_path = Path(metadata_path)
+        self.manifest_path = Path(manifest_path)
+        
+        self.metadata = pd.read_csv(self.metadata_path)
+        self.sequences_manifest = pd.read_csv(self.manifest_path)
+        
+        print(f"✓ Loaded dataset")
         print(f"  - Metadata: {len(self.metadata)} rows")
         print(f"  - Sequences manifest: {len(self.sequences_manifest)} rows")
-        print(f"  - Trajectory features: {len(self.trajectory_features)} rows")
         
-        # Display column names for debugging
-        print(f"\n  Columns in metadata: {list(self.metadata.columns)}")
-        print(f"  Columns in sequences_manifest: {list(self.sequences_manifest.columns)}")
-        print(f"  Columns in trajectory_features: {list(self.trajectory_features.columns)}")
-        
-        # Preprocess metadata and build trajectory cache
         self._build_trajectory_cache()
     
     def _build_trajectory_cache(self):
-        """Build trajectory cache from metadata"""
-        print("\n  Building trajectory cache from metadata...")
+        print("\n  Building trajectory cache...")
         
-        # Check if metadata contains position information
-        if 'xtl' in self.metadata.columns and 'ytl' in self.metadata.columns:
-            # Use bounding box top-left corner as trajectory point
-            # Alternatively use center point: (xtl + width/2, ytl + height/2)
-            self.metadata['center_x'] = self.metadata['xtl'] + self.metadata['width'] / 2
-            self.metadata['center_y'] = self.metadata['ytl'] + self.metadata['height'] / 2
+        self.trajectory_cache = {}
+        self.action_label_cache = {}
+        self.look_label_cache = {}
+        
+        metadata_groups = {}
+        for (video_id, ped_id), group in tqdm(self.metadata.groupby(['video_id', 'pedestrian_id']), desc="  Processing metadata"):
+            key = f"{video_id}__{ped_id}"
+            group_sorted = group.sort_values('frame_id')
+            centers_x = group_sorted['xtl'] + group_sorted['width'] / 2
+            centers_y = group_sorted['ytl'] + group_sorted['height'] / 2
+            trajectory = np.column_stack([centers_x.values, centers_y.values]).astype(np.float32)
+            metadata_groups[key] = trajectory
+        
+        print(f"  Created {len(metadata_groups)} trajectory groups")
+        
+        for idx, row in tqdm(self.sequences_manifest.iterrows(), desc="  Processing sequences", total=len(self.sequences_manifest)):
+            seq_id = row['sequence_id']
+            video_id = row['video_id']
+            pedestrian_id = row['pedestrian_id']
+            start_frame = int(row['start_frame'])
+            end_frame = int(row['end_frame'])
             
-            # Group by sequence_id
-            if 'sequence_id' not in self.metadata.columns:
-                # If sequence_id doesn't exist, use video_id + pedestrian_id combination
-                print("  Warning: 'sequence_id' not found in metadata, using video_id+pedestrian_id")
-                self.metadata['sequence_id'] = self.metadata['video_id'] + '__' + self.metadata['pedestrian_id'].astype(str)
-            
-            # Sort by sequence_id and frame_id
-            self.metadata_sorted = self.metadata.sort_values(['sequence_id', 'frame_id'])
-            
-            # Group and store trajectories
-            self.trajectory_cache = {}
-            for seq_id, group in self.metadata_sorted.groupby('sequence_id'):
-                # Extract trajectory coordinates (using center point)
-                traj = group[['center_x', 'center_y']].values.astype(np.float32)
-                if len(traj) >= 5:  # Minimum 5 frames
-                    self.trajectory_cache[str(seq_id)] = traj
-            
-            print(f"  ✓ Built cache with {len(self.trajectory_cache)} trajectories")
-        else:
-            print("  Warning: No position data (xtl/ytl) found in metadata")
-            self.trajectory_cache = {}
+            key = f"{video_id}__{pedestrian_id}"
+            if key in metadata_groups:
+                full_traj = metadata_groups[key]
+                if len(full_traj) >= 10:
+                    self.trajectory_cache[seq_id] = full_traj
+                    self.action_label_cache[seq_id] = self._get_action_label(row['sequence_behavior_label'])
+                    self.look_label_cache[seq_id] = self._get_look_label_for_sequence(video_id, pedestrian_id, start_frame, end_frame)
+        
+        print(f"  ✓ Built cache with {len(self.trajectory_cache)} sequences")
+        
+        action_counts = {}
+        look_counts = {}
+        for seq_id in self.trajectory_cache.keys():
+            action = self.action_label_cache.get(seq_id, 'unknown')
+            look = self.look_label_cache.get(seq_id, 'unknown')
+            action_counts[action] = action_counts.get(action, 0) + 1
+            look_counts[look] = look_counts.get(look, 0) + 1
+        
+        print(f"  Action distribution: {action_counts}")
+        print(f"  Look distribution: {look_counts}")
     
-    def get_available_sequences(self) -> List[str]:
-        """Get all available sequence IDs"""
-        # Priority: use sequences from cache
-        if hasattr(self, 'trajectory_cache') and self.trajectory_cache:
-            return list(self.trajectory_cache.keys())
-        
-        # Otherwise get from sequences_manifest
-        if 'sequence_id' in self.sequences_manifest.columns:
-            return self.sequences_manifest['sequence_id'].astype(str).unique().tolist()
-        elif 'seq_id' in self.sequences_manifest.columns:
-            return self.sequences_manifest['seq_id'].astype(str).unique().tolist()
-        else:
-            possible_cols = ['id', 'seq_id', 'sequence_id', 'track_id']
-            for col in possible_cols:
-                if col in self.sequences_manifest.columns:
-                    return self.sequences_manifest[col].astype(str).unique().tolist()
-            return []
-    
-    def get_trajectory_by_sequence_id(self, sequence_id: Union[str, int]) -> Optional[np.ndarray]:
-        """
-        Get trajectory data by sequence_id
-        
-        Returns:
-            trajectory: numpy array of shape (seq_len, 2) containing x, y coordinates
-        """
-        seq_id_str = str(sequence_id)
-        
-        # Priority: get from cache
-        if hasattr(self, 'trajectory_cache') and seq_id_str in self.trajectory_cache:
-            return self.trajectory_cache[seq_id_str]
-        
-        # If not in cache, try to generate synthetic trajectory from trajectory_features (for demo)
-        # Note: trajectory_features only has statistical features, not coordinates
-        # Generate a synthetic trajectory for demonstration
-        if seq_id_str in self.trajectory_features['sequence_id'].astype(str).values:
-            # Get features for this sequence
-            row = self.trajectory_features[self.trajectory_features['sequence_id'].astype(str) == seq_id_str].iloc[0]
-            
-            # Generate synthetic trajectory (in production, use actual coordinate data)
-            traj_len = min(int(row.get('trajectory_length', 30)), 50)
-            traj_len = max(traj_len, 10)
-            
-            # Generate synthetic trajectory based on motion direction
-            direction = row.get('motion_direction', 'right')
-            speed = row.get('speed_mean', 5)
-            
-            # Generate random but continuous trajectory
-            t = np.linspace(0, traj_len, traj_len)
-            if 'right' in str(direction).lower():
-                x = t * speed + np.random.randn(traj_len) * 2
-            else:
-                x = -t * speed + np.random.randn(traj_len) * 2
-            
-            y = np.sin(t * 0.3) * 20 + np.random.randn(traj_len) * 3 + 100
-            
-            traj = np.column_stack([x, y]).astype(np.float32)
-            return traj
-        
-        print(f"⚠ No trajectory data found for sequence_id: {sequence_id}")
-        return None
-    
-    def get_behavior_label(self, sequence_id: Union[str, int]) -> Optional[str]:
-        """Get behavior label for a sequence"""
-        seq_id_str = str(sequence_id)
-        
-        # Get from sequences_manifest
-        if 'sequence_id' in self.sequences_manifest.columns:
-            mask = self.sequences_manifest['sequence_id'].astype(str) == seq_id_str
-        elif 'seq_id' in self.sequences_manifest.columns:
-            mask = self.sequences_manifest['seq_id'].astype(str) == seq_id_str
-        else:
-            mask = self.sequences_manifest.iloc[:, 0].astype(str) == seq_id_str
-        
-        if mask.any():
-            # Try to get behavior label
-            label_cols = ['sequence_behavior_label', 'behavior_label', 'action', 'label']
-            for col in label_cols:
-                if col in self.sequences_manifest.columns:
-                    label = self.sequences_manifest.loc[mask, col].values[0]
-                    if pd.notna(label):
-                        return self._map_label_to_classes(label)
-        
-        # Get from metadata
-        if 'sequence_id' in self.metadata.columns:
-            mask = self.metadata['sequence_id'].astype(str) == seq_id_str
-        elif 'pedestrian_id' in self.metadata.columns and 'video_id' in self.metadata.columns:
-            # Try to parse video_id and pedestrian_id from sequence_id
-            parts = seq_id_str.split('__')
-            if len(parts) >= 2:
-                video_id = parts[0]
-                ped_id = parts[1]
-                mask = (self.metadata['video_id'] == video_id) & (self.metadata['pedestrian_id'].astype(str) == ped_id)
-            else:
-                mask = pd.Series([False] * len(self.metadata))
-        else:
-            mask = pd.Series([False] * len(self.metadata))
-        
-        if mask.any():
-            label_cols = ['behavior_label', 'crossing_label', 'action', 'label']
-            for col in label_cols:
-                if col in self.metadata.columns:
-                    # Take the most common label
-                    labels = self.metadata.loc[mask, col].dropna()
-                    if len(labels) > 0:
-                        label = labels.mode()[0] if len(labels) > 0 else labels.iloc[0]
-                        return self._map_label_to_classes(label)
-        
-        return None
-    
-    def _map_label_to_classes(self, label: str) -> str:
-        """Map original labels to four behavior classes"""
-        label_lower = str(label).lower()
+    def _get_action_label(self, behavior_label: str) -> str:
+        label_lower = str(behavior_label).lower()
         
         walking_keywords = ['walk', 'walking', 'moving', 'cross', 'crossing']
-        standing_keywords = ['stand', 'standing', 'wait', 'waiting']
-        looking_keywords = ['look', 'looking', 'watch', 'watching', 'gaze']
-        stopped_keywords = ['stop', 'stopped', 'idle', 'static', 'still']
-        
         for kw in walking_keywords:
             if kw in label_lower:
                 return 'walking'
+        
+        standing_keywords = ['stand', 'standing', 'wait', 'waiting', 'stop', 'stopped', 'idle', 'static', 'still']
         for kw in standing_keywords:
             if kw in label_lower:
                 return 'standing'
-        for kw in looking_keywords:
-            if kw in label_lower:
-                return 'looking'
-        for kw in stopped_keywords:
-            if kw in label_lower:
-                return 'stopped'
         
-        # Default return
         return 'walking'
     
-    def load_all_trajectories(self, min_length: int = 10, max_length: int = None) -> Tuple[List[np.ndarray], List[str], List[str]]:
-        """
-        Load all trajectories
+    def _get_look_label_for_sequence(self, video_id: str, pedestrian_id: str, start_frame: int, end_frame: int) -> str:
+        mask = (self.metadata['video_id'] == video_id) & \
+               (self.metadata['pedestrian_id'] == pedestrian_id) & \
+               (self.metadata['frame_id'] >= start_frame) & \
+               (self.metadata['frame_id'] <= end_frame)
         
-        Returns:
-            trajectories: List of trajectory arrays (each shape: seq_len, 2)
-            sequence_ids: List of sequence IDs
-            behavior_labels: List of behavior labels (for evaluation)
-        """
-        sequence_ids = self.get_available_sequences()
+        subset = self.metadata[mask]
         
+        if len(subset) == 0:
+            return 'not-looking'
+        
+        looking_count = (subset['look_label'] == 'looking').sum()
+        not_looking_count = (subset['look_label'] == 'not-looking').sum()
+        
+        return 'looking' if looking_count > not_looking_count else 'not-looking'
+    
+    def load_all_trajectories_with_labels(self, min_length: int = 10, sample_size: Optional[int] = None):
+        trajectories = []
+        action_labels = []
+        look_labels = []
+        
+        for seq_id, traj in tqdm(self.trajectory_cache.items(), desc="  Loading trajectories"):
+            if len(traj) < min_length:
+                continue
+            
+            action_label = self.action_label_cache.get(seq_id)
+            look_label = self.look_label_cache.get(seq_id)
+            
+            if action_label and look_label:
+                trajectories.append(traj)
+                action_labels.append(action_label)
+                look_labels.append(look_label)
+        
+        if sample_size and sample_size < len(trajectories):
+            indices = np.random.choice(len(trajectories), sample_size, replace=False)
+            trajectories = [trajectories[i] for i in indices]
+            action_labels = [action_labels[i] for i in indices]
+            look_labels = [look_labels[i] for i in indices]
+            print(f"  ✓ Sampled {sample_size} trajectories")
+        
+        print(f"✓ Loaded {len(trajectories)} labeled trajectories")
+        return trajectories, action_labels, look_labels
+    
+    def load_all_trajectories(self, min_length: int = 10, max_length: int = None):
+        """Load all trajectories for inference (for Stage 2)"""
         trajectories = []
         valid_ids = []
         valid_labels = []
         
-        for seq_id in sequence_ids:
-            traj = self.get_trajectory_by_sequence_id(seq_id)
-            
-            if traj is None or len(traj) < min_length:
+        for seq_id, traj in tqdm(self.trajectory_cache.items(), desc="  Loading trajectories for inference"):
+            if len(traj) < min_length:
                 continue
             
             if max_length and len(traj) > max_length:
-                # Optionally truncate
                 traj = traj[:max_length]
             
-            label = self.get_behavior_label(seq_id)
+            action_label = self.action_label_cache.get(seq_id, 'unknown')
+            look_label = self.look_label_cache.get(seq_id, 'unknown')
             
             trajectories.append(traj)
-            valid_ids.append(str(seq_id))
-            valid_labels.append(label if label else 'unknown')
+            valid_ids.append(seq_id)
+            valid_labels.append(f"{action_label}_{look_label}")
         
-        print(f"✓ Loaded {len(trajectories)} trajectories (min_length={min_length})")
-        
-        # Count label distribution
-        label_counts = {}
-        for label in valid_labels:
-            label_counts[label] = label_counts.get(label, 0) + 1
-        print(f"  Label distribution: {label_counts}")
-        
+        print(f"✓ Loaded {len(trajectories)} trajectories for inference")
         return trajectories, valid_ids, valid_labels
+
+
+def prepare_data_for_training(trajectories, action_labels, look_labels, target_length=32, val_split=0.2, batch_size=32):
+    print("\n  Preparing data...")
     
-    def get_trajectory_features_df(self) -> pd.DataFrame:
-        """Return trajectory features DataFrame for exploration"""
-        return self.trajectory_features
+    processed_trajectories = []
+    for traj in tqdm(trajectories, desc="  Processing trajectories"):
+        if len(traj) > target_length:
+            processed_traj = traj[:target_length]
+        else:
+            pad_length = target_length - len(traj)
+            processed_traj = np.vstack([traj, np.zeros((pad_length, 2))])
+        processed_trajectories.append(processed_traj)
+    
+    X = np.array(processed_trajectories)
+    
+    action_encoder = LabelEncoder()
+    look_encoder = LabelEncoder()
+    
+    y_action = action_encoder.fit_transform(action_labels)
+    y_look = look_encoder.fit_transform(look_labels)
+    
+    print(f"\nAction label encoding: {dict(zip(action_encoder.classes_, range(len(action_encoder.classes_))))}")
+    print(f"Look label encoding: {dict(zip(look_encoder.classes_, range(len(look_encoder.classes_))))}")
+    
+    X_tensor = torch.FloatTensor(X)
+    y_action_tensor = torch.LongTensor(y_action)
+    y_look_tensor = torch.LongTensor(y_look)
+    
+    dataset = TensorDataset(X_tensor, y_action_tensor, y_look_tensor)
+    
+    val_size = int(len(dataset) * val_split)
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    
+    print(f"\nData split: Train={train_size}, Val={val_size}, Batch size={batch_size}")
+    
+    return train_loader, val_loader, action_encoder, look_encoder
+
+
+def train_model(model, train_loader, val_loader, epochs=50, lr=0.001, device='cpu'):
+    action_criterion = nn.CrossEntropyLoss()
+    look_criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+    
+    best_val_loss = float('inf')
+    best_action_metrics = None
+    best_look_metrics = None
+    
+    print("\n" + "=" * 60)
+    print("Starting Multi-Task Training")
+    print("=" * 60)
+    
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        train_action_correct = 0
+        train_look_correct = 0
+        train_total = 0
+        
+        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]', leave=False)
+        for batch_x, batch_action_y, batch_look_y in train_pbar:
+            batch_x = batch_x.to(device)
+            batch_action_y = batch_action_y.to(device)
+            batch_look_y = batch_look_y.to(device)
+            
+            optimizer.zero_grad()
+            action_logits, look_logits, _, _, _ = model(batch_x)
+            
+            action_loss = action_criterion(action_logits, batch_action_y)
+            look_loss = look_criterion(look_logits, batch_look_y)
+            loss = action_loss + look_loss
+            
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            _, action_pred = torch.max(action_logits, 1)
+            _, look_pred = torch.max(look_logits, 1)
+            
+            train_total += batch_x.size(0)
+            train_action_correct += (action_pred == batch_action_y).sum().item()
+            train_look_correct += (look_pred == batch_look_y).sum().item()
+            
+            train_pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+        
+        train_action_acc = train_action_correct / train_total
+        train_look_acc = train_look_correct / train_total
+        avg_train_loss = train_loss / len(train_loader)
+        
+        model.eval()
+        val_loss = 0.0
+        val_action_correct = 0
+        val_look_correct = 0
+        val_total = 0
+        
+        val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]', leave=False)
+        with torch.no_grad():
+            for batch_x, batch_action_y, batch_look_y in val_pbar:
+                batch_x = batch_x.to(device)
+                batch_action_y = batch_action_y.to(device)
+                batch_look_y = batch_look_y.to(device)
+                
+                action_logits, look_logits, _, _, _ = model(batch_x)
+                
+                action_loss = action_criterion(action_logits, batch_action_y)
+                look_loss = look_criterion(look_logits, batch_look_y)
+                loss = action_loss + look_loss
+                
+                val_loss += loss.item()
+                _, action_pred = torch.max(action_logits, 1)
+                _, look_pred = torch.max(look_logits, 1)
+                
+                val_total += batch_x.size(0)
+                val_action_correct += (action_pred == batch_action_y).sum().item()
+                val_look_correct += (look_pred == batch_look_y).sum().item()
+        
+        val_action_acc = val_action_correct / val_total
+        val_look_acc = val_look_correct / val_total
+        avg_val_loss = val_loss / len(val_loader)
+        
+        scheduler.step(avg_val_loss)
+        
+        print(f"\nEpoch [{epoch+1}/{epochs}]")
+        print(f"  Train Loss: {avg_train_loss:.4f}")
+        print(f"  Train Action Acc: {train_action_acc:.4f}, Train Look Acc: {train_look_acc:.4f}")
+        print(f"  Val Action Acc: {val_action_acc:.4f}, Val Look Acc: {val_look_acc:.4f}")
+        
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            print(f"  Evaluating best model...")
+            best_action_metrics, best_look_metrics = evaluate_model(model, val_loader, device)
+            torch.save(model.state_dict(), 'best_multitask_model.pt')
+            print(f"  ✓ Best model saved")
+        print("-" * 60)
+    
+    print("\n✓ Training completed!")
+    model.load_state_dict(torch.load('best_multitask_model.pt'))
+    return model, best_action_metrics, best_look_metrics
 
 
 class Stage1Processor:
-    """Stage 1 Data Processor - Main interface for behavior recognition"""
-    
     def __init__(self, model_path: Optional[str] = None, device: str = 'cpu'):
         self.device = device
         self.model = None
         
         if model_path and os.path.exists(model_path):
-            self.model, _ = CNNLSTMBehaviorRecognizer.load_pt(model_path, device)
+            self.model, _ = MultiTaskBehaviorRecognizer.load_pt(model_path, device)
             self.model.to(device)
             self.model.eval()
-            print(f"Using PyTorch model: {model_path}")
-        else:
-            print("No model loaded. Use train_model() first or provide model_path.")
+            print(f"Using model: {model_path}")
     
-    def process_trajectory(
-        self,
-        trajectory: np.ndarray,
-        sequence_id: str,
-        output_format: str = "dict"
-    ) -> Union[Dict, str, List]:
-        """Process a single trajectory"""
-        if not isinstance(trajectory, np.ndarray):
-            trajectory = np.array(trajectory)
-        
-        if trajectory.ndim != 2 or trajectory.shape[1] != 2:
-            raise ValueError(f"Trajectory must be of shape (seq_len, 2), got {trajectory.shape}")
-        
-        if self.model is None:
-            raise ValueError("No model loaded. Please provide model_path when initializing processor.")
-        
-        output = self.model.predict(trajectory, sequence_id)
-        
-        if output_format == "dict":
-            return output.to_dict()
-        elif output_format == "json":
-            return json.dumps(output.to_dict(), indent=2)
-        elif output_format == "csv":
-            return output.to_csv_row()
-        else:
-            return output.to_dict()
-    
-    def process_to_dataframe(
-        self,
-        trajectories: List[np.ndarray],
-        sequence_ids: List[str],
-        output_file: Optional[str] = None
-    ) -> pd.DataFrame:
-        """Process trajectories and return as DataFrame in required format"""
-        results = []
-        for traj, seq_id in zip(trajectories, sequence_ids):
-            result = self.process_trajectory(traj, seq_id, "dict")
-            results.append(result)
-        
-        # Create DataFrame in required format
-        rows = []
-        for result in results:
-            row = {'sequence_id': result['sequence_id']}
-            
-            # Expand embedding (64 dimensions)
-            for j, val in enumerate(result['behavior_embedding']):
-                row[f'beh_emb_{j}'] = val
-            
-            # Expand probabilities
-            probs = result['behavior_probabilities']
-            row['p_walk'] = probs.get('walking', 0.0)
-            row['p_stand'] = probs.get('standing', 0.0)
-            row['p_look'] = probs.get('looking', 0.0)
-            row['p_stop'] = probs.get('stopped', 0.0)
-            
-            rows.append(row)
-        
-        df = pd.DataFrame(rows)
-        
-        if output_file:
-            df.to_csv(output_file, index=False)
-            print(f"✓ Results saved to {output_file}")
-        
-        return df
-    
-    def process_dataset(
-        self,
-        data_loader: JAADDataLoader,
-        min_length: int = 10,
-        output_file: Optional[str] = None,
-        save_embeddings: bool = True
-    ) -> pd.DataFrame:
-        """
-        Process the entire dataset
-        
-        Args:
-            data_loader: JAADDataLoader instance
-            min_length: Minimum trajectory length
-            output_file: Output CSV file path
-            save_embeddings: Whether to save embedding vectors to .npy file
-        """
+    def process_dataset(self, data_loader: JAADDataLoader, min_length: int = 10, output_file: Optional[str] = None):
         print("\n" + "=" * 60)
-        print("Processing JAAD Dataset with Stage 1 Model")
+        print("Processing Dataset for Stage 2")
         print("=" * 60)
         
-        # Load all trajectories
-        trajectories, sequence_ids, true_labels = data_loader.load_all_trajectories(min_length=min_length)
+        trajectories, sequence_ids, _ = data_loader.load_all_trajectories(min_length=min_length)
         
         if len(trajectories) == 0:
             print("No valid trajectories found!")
             return pd.DataFrame()
         
-        # Batch processing
         print(f"\nProcessing {len(trajectories)} trajectories...")
         results = []
-        for i, (traj, seq_id) in enumerate(zip(trajectories, sequence_ids)):
-            result = self.process_trajectory(traj, seq_id, "dict")
-            results.append(result)
-            
-            if (i + 1) % 100 == 0:
-                print(f"  Progress: {i+1}/{len(trajectories)}")
+        for traj, seq_id in tqdm(zip(trajectories, sequence_ids), desc="  Processing", total=len(trajectories)):
+            if self.model:
+                result = self.model.predict(traj, seq_id)
+                results.append(result)
         
-        # Create DataFrame in required format
-        print("\nCreating DataFrame in required format...")
+        print("\nCreating Stage 2 CSV...")
         rows = []
-        for i, result in enumerate(results):
-            row = {}
+        for result in results:
+            row = {'sequence_id': result.sequence_id}
             
-            # 1. sequence_id
-            row['sequence_id'] = result['sequence_id']
-            
-            # 2. behavior embedding (expand to 64 separate columns)
-            embedding = result['behavior_embedding']
-            for j, val in enumerate(embedding):
+            for j, val in enumerate(result.behavior_embedding):
                 row[f'beh_emb_{j}'] = val
             
-            # 3. behavior probabilities (expand to 4 separate columns)
-            probs = result['behavior_probabilities']
-            row['p_walk'] = probs.get('walking', 0.0)
-            row['p_stand'] = probs.get('standing', 0.0)
-            row['p_look'] = probs.get('looking', 0.0)
-            row['p_stop'] = probs.get('stopped', 0.0)
+            row['p_walk'] = result.action_probabilities.get('walking', 0.0)
+            row['p_stand'] = result.action_probabilities.get('standing', 0.0)
+            row['p_look'] = result.look_probabilities.get('looking', 0.0)
+            row['p_notlook'] = result.look_probabilities.get('not-looking', 0.0)
             
             rows.append(row)
         
         df = pd.DataFrame(rows)
         
-        # Optional: Add extra information for debugging (doesn't affect Stage 2 usage)
-        df['behavior_label'] = [r['behavior_label'] for r in results]
-        df['true_label'] = true_labels
-        df['trajectory_length'] = [len(t) for t in trajectories]
+        for j in range(64):
+            if f'beh_emb_{j}' not in df.columns:
+                df[f'beh_emb_{j}'] = 0.0
         
-        print(f"\n✓ Processing complete!")
-        print(f"  Total trajectories: {len(df)}")
-        print(f"  DataFrame shape: {df.shape}")
-        print(f"  Columns: {list(df.columns[:5])} ... beh_emb_63, p_walk, p_stand, p_look, p_stop")
+        embedding_cols = [f'beh_emb_{j}' for j in range(64)]
+        other_cols = ['sequence_id', 'p_walk', 'p_stand', 'p_look', 'p_notlook']
+        df = df[embedding_cols + other_cols]
         
-        # Calculate accuracy for validation
-        df['correct'] = df['behavior_label'] == df['true_label']
-        accuracy = df['correct'].mean()
-        print(f"  Accuracy (vs true labels): {accuracy:.2%}")
+        print(f"\n✓ Processing complete! {len(df)} trajectories processed")
         
-        # Save results to CSV (only save required format columns)
         if output_file:
-            output_columns = ['sequence_id'] + [f'beh_emb_{j}' for j in range(64)] + ['p_walk', 'p_stand', 'p_look', 'p_stop']
-            df[output_columns].to_csv(output_file, index=False)
-            print(f"  Results saved to: {output_file}")
-        
-        # Save embeddings for downstream tasks
-        if save_embeddings:
-            embeddings = np.vstack([r['behavior_embedding'] for r in results])
-            embedding_file = output_file.replace('.csv', '_embeddings.npy') if output_file else "embeddings.npy"
-            np.save(embedding_file, embeddings)
-            print(f"  Embeddings saved to: {embedding_file}")
-        
-        # Print confusion matrix
-        if accuracy > 0:
-            self._print_confusion_matrix(df)
+            df.to_csv(output_file, index=False)
+            print(f"✓ Stage 2 CSV saved to: {output_file}")
         
         return df
-    
-    def _print_confusion_matrix(self, df: pd.DataFrame):
-        """Print confusion matrix"""
-        labels = ['walking', 'standing', 'looking', 'stopped']
-        conf_matrix = {}
-        
-        for true_label in labels:
-            conf_matrix[true_label] = {}
-            for pred_label in labels:
-                conf_matrix[true_label][pred_label] = 0
-        
-        for _, row in df.iterrows():
-            true = row['true_label']
-            pred = row['behavior_label']
-            if true in conf_matrix and pred in conf_matrix[true]:
-                conf_matrix[true][pred] += 1
-        
-        print("\n  Confusion Matrix:")
-        header = " " * 12 + "".join([f"{l:10}" for l in labels])
-        print(header)
-        for true_label in labels:
-            row_str = f"{true_label:12}"
-            for pred_label in labels:
-                row_str += f"{conf_matrix[true_label].get(pred_label, 0):10}"
-            print(row_str)
-
-
-class SafeJSONEncoder(json.JSONEncoder):
-    """Safe JSON encoder for handling non-serializable objects"""
-    def default(self, obj):
-        if isinstance(obj, (np.integer, np.int64, np.int32)):
-            return int(obj)
-        elif isinstance(obj, (np.floating, np.float64, np.float32)):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        else:
-            return str(obj)
-
-
-class Stage1OutputInterface:
-    """Standardized interface for Stage 1 output to be consumed by Stage 2"""
-    
-    @staticmethod
-    def to_downstream_format(stage1_output: Dict) -> Dict:
-        """Convert Stage 1 output to format expected by Stage 2"""
-        return {
-            "type": "behavior_features",
-            "source": "stage1",
-            "data": {
-                "sequence_id": stage1_output["sequence_id"],
-                "behavior_label": stage1_output["behavior_label"],
-                "behavior_embedding": stage1_output["behavior_embedding"],
-                "behavior_probabilities": stage1_output["behavior_probabilities"],
-                "confidence": max(stage1_output["behavior_probabilities"].values())
-            }
-        }
-    
-    @staticmethod
-    def to_message_format(stage1_output: Dict) -> str:
-        """Convert to human-readable message format"""
-        probs = stage1_output["behavior_probabilities"]
-        top_behavior = stage1_output["behavior_label"]
-        confidence = probs[top_behavior]
-        return f"Pedestrian {stage1_output['sequence_id']} is {top_behavior} (confidence: {confidence:.2%})"
-
-
-def train_demo_model(save_path: str = "models/jaad_model.pt"):
-    """Train a demo model (using random weights)"""
-    os.makedirs("models", exist_ok=True)
-    model = CNNLSTMBehaviorRecognizer()
-    model.save_pt(save_path, metadata={"demo": True, "dataset": "JAAD"})
-    print(f"Demo model saved to {save_path}")
-    return model
 
 
 def main():
-    """Main function - use your JAAD dataset"""
     print("=" * 60)
-    print("STAGE 1 BEHAVIOR RECOGNITION - JAAD DATASET")
+    print("STAGE 1: MULTI-TASK BEHAVIOR RECOGNITION")
+    print("Predicting: Action (Walking/Standing) + Look (Looking/Not-looking)")
     print("=" * 60)
     
-    # Get the project root directory (assuming script is in models/stage1/)
-    script_dir = Path(__file__).parent  # models/stage1/
-    project_root = script_dir.parent.parent  # Project root
+    QUICK_TEST = False
+    TEST_SAMPLE_SIZE = 5000
+    EPOCHS = 50
     
-    print(f"\n📁 Script directory: {script_dir}")
-    print(f"📁 Project root: {project_root}")
+    base_dir = r"E:\有记录\ISY5004-Group6-Project-main (1)\ISY5004-Group6-Project-main"
+    metadata_path = os.path.join(base_dir, "data", "filtered_metadata.csv")
+    manifest_path = os.path.join(base_dir, "data", "filtered_sequences_manifest.csv")
     
-    # 1. Select dataset path (using absolute paths)
-    data_paths = [
-        str(project_root / "data/processed/jaad"),
-        str(project_root / "data/processed/mock_jaad")
-    ]
-    
-    data_path = None
-    for path in data_paths:
-        if os.path.exists(path):
-            data_path = path
-            print(f"\n✓ Found dataset at: {data_path}")
-            break
-    
-    if data_path is None:
-        print("\n❌ Dataset not found! Please check your data path.")
-        print(f"Project root: {project_root}")
-        print("Expected paths:")
-        for path in data_paths:
-            print(f"  - {path}")
-        
-        # Try to list data directory contents for debugging
-        data_dir = project_root / "data" / "processed"
-        if data_dir.exists():
-            print(f"\n📂 Contents of {data_dir}:")
-            for item in data_dir.iterdir():
-                print(f"    - {item.name}")
-        else:
-            print(f"\n❌ {data_dir} does not exist!")
-            print("   Please make sure your data files are in the correct location.")
+    if not os.path.exists(metadata_path) or not os.path.exists(manifest_path):
+        print("Data files not found!")
         return
     
-    # 2. Load data
-    data_loader = JAADDataLoader(data_path)
+    print("\n✓ Data files found!")
     
-    # 3. Check data format (optional: show examples)
-    print("\n" + "-" * 40)
-    print("Data Exploration:")
-    print("-" * 40)
+    data_loader = JAADDataLoader(metadata_path, manifest_path)
     
-    # Show first few rows of trajectory_features
-    print("\nFirst 5 rows of trajectory_features.csv:")
-    print(data_loader.trajectory_features.head())
-    
-    # Show available sequences
-    seq_ids = data_loader.get_available_sequences()
-    print(f"\nAvailable sequences: {len(seq_ids)}")
-    if len(seq_ids) > 0:
-        print(f"First 5 sequence IDs: {seq_ids[:5]}")
-    
-    # Show an example trajectory
-    if len(seq_ids) > 0:
-        sample_traj = data_loader.get_trajectory_by_sequence_id(seq_ids[0])
-        if sample_traj is not None:
-            print(f"\nExample trajectory (first sequence):")
-            print(f"  Shape: {sample_traj.shape}")
-            print(f"  First 5 positions:\n{sample_traj[:5]}")
-            label = data_loader.get_behavior_label(seq_ids[0])
-            print(f"  Behavior label: {label}")
-    
-    # 4. Train/Load model
-    print("\n" + "-" * 40)
-    print("Model Setup:")
-    print("-" * 40)
-    
-    # Save model to models folder in project root
-    model_dir = project_root / "models"
-    model_dir.mkdir(exist_ok=True)
-    model_path = str(model_dir / "jaad_model.pt")
-    
-    if not os.path.exists(model_path):
-        print("Training demo model...")
-        train_demo_model(model_path)
-    else:
-        print(f"Model already exists at: {model_path}")
-    
-    # 5. Initialize processor
-    processor = Stage1Processor(model_path=model_path, device='cpu')
-    
-    # 6. Process the entire dataset
-    output_file = str(project_root / "stage1_jaad_results.csv")
-    df = processor.process_dataset(
-        data_loader=data_loader,
-        min_length=10,  # Minimum 10 frames
-        output_file=output_file,
-        save_embeddings=True
+    sample_size = TEST_SAMPLE_SIZE if QUICK_TEST else None
+    trajectories, action_labels, look_labels = data_loader.load_all_trajectories_with_labels(
+        min_length=10, sample_size=sample_size
     )
     
-    # 7. Display result summary
+    if len(trajectories) == 0:
+        print("No labeled trajectories found!")
+        return
+    
+    if QUICK_TEST:
+        EPOCHS = min(EPOCHS, 10)
+        print(f"\n⚠ QUICK TEST MODE: {EPOCHS} epochs")
+    
+    train_loader, val_loader, action_encoder, look_encoder = prepare_data_for_training(
+        trajectories, action_labels, look_labels, target_length=32, val_split=0.2, batch_size=32
+    )
+    
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if device == 'cpu':
+        print("\n⚠ Training on CPU (slow). Set QUICK_TEST=True for faster testing.")
+    
+    model = MultiTaskBehaviorRecognizer(num_action_classes=2, num_look_classes=2)
+    model.to(device)
+    
+    print(f"\nModel on {device}")
+    print(f"Action classes: {model.action_classes}")
+    print(f"Look classes: {model.look_classes}")
+    
+    model, action_metrics, look_metrics = train_model(
+        model, train_loader, val_loader, epochs=EPOCHS, lr=0.001, device=device
+    )
+    
+    print_metrics_table(action_metrics, look_metrics, model, "Final Model Evaluation")
+    
+    model_dir = Path("models")
+    model_dir.mkdir(exist_ok=True)
+    model_path = str(model_dir / "stage1_multitask_model.pt")
+    
+    model.save_pt(model_path, metadata={
+        "task": "multi-task",
+        "action_classes": model.action_classes,
+        "look_classes": model.look_classes,
+        "action_accuracy": float(action_metrics['accuracy']),
+        "look_accuracy": float(look_metrics['accuracy']),
+        "quick_test": QUICK_TEST
+    })
+    
+    processor = Stage1Processor(model_path=model_path, device=device)
+    output_csv = "stage2_input.csv"
+    df = processor.process_dataset(data_loader, min_length=10, output_file=output_csv)
+    
     if len(df) > 0:
         print("\n" + "=" * 60)
-        print("RESULTS SUMMARY")
+        print("STAGE 2 CSV PREVIEW")
         print("=" * 60)
-        print(f"Total processed: {len(df)} trajectories")
-        
-        # Use behavior_label column if it exists
-        if 'behavior_label' in df.columns:
-            print(f"\nPredicted behavior distribution:")
-            for label, count in df['behavior_label'].value_counts().items():
-                print(f"  {label}: {count} ({count/len(df)*100:.1f}%)")
-        
-        # Calculate average confidence (from probability columns)
-        prob_cols = ['p_walk', 'p_stand', 'p_look', 'p_stop']
-        existing_prob_cols = [col for col in prob_cols if col in df.columns]
-        if existing_prob_cols:
-            max_probs = df[existing_prob_cols].max(axis=1)
-            print(f"\nAverage confidence: {max_probs.mean():.3f}")
-        
-        # Show first few results
-        print("\nFirst 5 results:")
-        display_cols = ['sequence_id']
-        display_cols.extend([col for col in prob_cols if col in df.columns])
-        if 'behavior_label' in df.columns:
-            display_cols.append('behavior_label')
-        if 'true_label' in df.columns:
-            display_cols.append('true_label')
-        
-        print(df[display_cols].head())
-        
-        # Show output file locations
-        print(f"\n✓ Results saved to: {output_file}")
-        print(f"✓ Embeddings saved to: {output_file.replace('.csv', '_embeddings.npy')}")
-    
-    print("\n" + "=" * 60)
-    print("✓ Stage 1 Processing Complete!")
-    print("=" * 60)
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns[:5])} ... {list(df.columns[-5:])}")
+        print("\nFirst 3 rows:")
+        print(df.head(3).to_string())
+        print(f"\n✓ Ready for Stage 2! CSV saved to: {output_csv}")
 
 
 if __name__ == "__main__":
