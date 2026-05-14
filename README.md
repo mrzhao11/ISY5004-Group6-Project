@@ -116,3 +116,37 @@ Request example:
 3. Upload your team dataset under `data/raw` and connect preprocessing outputs into `data/processed`.
 4. Add experiment scripts for Accuracy, F1, AUC, and mAP.
 5. Save trained artifacts into `models/stage1` and `models/stage2`.
+
+## Stage 1 Inference Artifacts
+
+The current trained Stage 1 inference code has been migrated into:
+
+```text
+stage1_inference/
+  config.py
+  dataset.py
+  frame_dataset.py
+  infer_best.py
+  models.py
+models/stage1/
+  action_sequence_swin3d_t.pt
+  look_frame_swin_t.pt
+```
+
+The migrated Stage 1 setup uses:
+
+- Action classifier: 16-frame sequence input, Video Swin-T checkpoint.
+- Look classifier: single-frame Swin-T checkpoint, frame probabilities averaged per pedestrian track.
+
+Run inference from the project root:
+
+```bash
+python -m stage1_inference.infer_best \
+  --action-manifest-path ../stage1/artifacts/stage1_manifest.csv \
+  --frame-manifest-path ../dataset/processed/jaad_frame_stage1/frame_manifest.csv \
+  --split test \
+  --device cuda \
+  --output-path outputs/predictions/stage1_best_inference_test.csv
+```
+
+Use `--device cpu` if CUDA is not available. The output CSV contains action/look predictions, probabilities, and a 512-dimensional behavior embedding per action sequence window.
