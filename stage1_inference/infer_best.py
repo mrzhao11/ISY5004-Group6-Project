@@ -36,11 +36,11 @@ def build_argparser() -> argparse.ArgumentParser:
         default=Path("models/stage1/look_frame_swin_t.pt"),
         help="Single-frame model checkpoint for look not-looking/looking.",
     )
-    parser.add_argument("--action-manifest-path", type=Path, default=Path("stage1/artifacts/stage1_manifest.csv"))
+    parser.add_argument("--action-manifest-path", type=Path, default=Path("data/processed/stage1/action_manifest.csv"))
     parser.add_argument(
         "--frame-manifest-path",
         type=Path,
-        default=Path("dataset/processed/jaad_frame_stage1/frame_manifest.csv"),
+        default=Path("data/processed/stage1/frame_manifest.csv"),
     )
     parser.add_argument("--sequence-source-path", type=Path, default=None)
     parser.add_argument("--output-path", type=Path, default=Path("stage1/artifacts/stage1_best_inference.csv"))

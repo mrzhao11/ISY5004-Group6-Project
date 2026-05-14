@@ -131,6 +131,12 @@ stage1_inference/
 models/stage1/
   action_sequence_swin3d_t.pt
   look_frame_swin_t.pt
+data/processed/stage1/
+  action_manifest.csv
+  frame_manifest.csv
+  action_crops/
+  frame_crops/
+  action_tracks/
 ```
 
 The migrated Stage 1 setup uses:
@@ -142,11 +148,16 @@ Run inference from the project root:
 
 ```bash
 python -m stage1_inference.infer_best \
-  --action-manifest-path ../stage1/artifacts/stage1_manifest.csv \
-  --frame-manifest-path ../dataset/processed/jaad_frame_stage1/frame_manifest.csv \
   --split test \
   --device cuda \
   --output-path outputs/predictions/stage1_best_inference_test.csv
 ```
+
+The command uses project-local default paths:
+
+- `data/processed/stage1/action_manifest.csv`
+- `data/processed/stage1/frame_manifest.csv`
+- `models/stage1/action_sequence_swin3d_t.pt`
+- `models/stage1/look_frame_swin_t.pt`
 
 Use `--device cpu` if CUDA is not available. The output CSV contains action/look predictions, probabilities, and a 512-dimensional behavior embedding per action sequence window.
