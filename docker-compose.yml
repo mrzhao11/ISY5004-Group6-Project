@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: pedestrian_sensing_backend
     environment:
-      AUTO_DOWNLOAD_STAGE1_WEIGHTS: "1"
+      AUTO_DOWNLOAD_MODEL_WEIGHTS: "1"
     ports:
       - "8000:8000"
     volumes:
@@ -21,6 +21,7 @@ services:
       - "8080:80"
     volumes:
       - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
     restart: unless-stopped
