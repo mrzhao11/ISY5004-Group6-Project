@@ -68,6 +68,8 @@ class RiskPrediction(BaseModel):
     crossing_probability: Optional[float] = None
     risk_level: Optional[str] = None
     feature_summary: Dict[str, float]
+    stage2_output_path: Optional[str] = None
+    primary_window_index: Optional[int] = None
 
 
 class AnalyzeResponse(BaseModel):

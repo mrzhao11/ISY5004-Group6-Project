@@ -18,7 +18,7 @@ function setStatuses(stage1, stage2) {
 
   stage1Status.textContent = stage1 === "done" ? "Completed" : stage1 === "running" ? "Running" : "Waiting";
   stage2Status.textContent =
-    stage2 === "done" ? "Completed" : stage2 === "running" ? "Running" : stage2 === "pending" ? "Pending" : "Waiting";
+    stage2 === "done" ? "Completed" : stage2 === "running" ? "Running" : "Waiting";
 }
 
 function renderResult(data, sourceLabel) {
@@ -48,6 +48,12 @@ function renderResult(data, sourceLabel) {
       `
     )
     .join("");
+  const crossingProbability =
+    data.stage2_risk.crossing_probability === null || data.stage2_risk.crossing_probability === undefined
+      ? "N/A"
+      : Number(data.stage2_risk.crossing_probability).toFixed(3);
+  const riskLevel = data.stage2_risk.risk_level || "N/A";
+  const riskClass = riskLevel.toLowerCase() === "high" ? "risk-high" : "risk-low";
 
   resultPanel.innerHTML = `
     <h2>Analysis Output</h2>
@@ -68,7 +74,11 @@ function renderResult(data, sourceLabel) {
       </div>
       <div class="kpi">
         <span>Crossing Risk</span>
-        <strong>${data.stage2_risk.status || "pending"}</strong>
+        <strong class="${riskClass}">${riskLevel}</strong>
+      </div>
+      <div class="kpi">
+        <span>Crossing Probability</span>
+        <strong>${crossingProbability}</strong>
       </div>
     </div>
 
@@ -81,9 +91,9 @@ function renderResult(data, sourceLabel) {
         : ""
     }
 
-    <h3>Stage 2 Status</h3>
-    <p class="result-line"><strong>Crossing Probability:</strong> Not available until Stage 2 model integration</p>
-    <p class="result-line"><strong>Status Message:</strong> ${data.stage2_risk.message}</p>
+    <h3>Crossing Prediction</h3>
+    <p class="result-line"><strong>Status:</strong> ${data.stage2_risk.status}</p>
+    <p class="result-line"><strong>Message:</strong> ${data.stage2_risk.message}</p>
 
     <h3>Extracted Pedestrian Crops</h3>
     <div class="preview-grid">${previewMarkup || '<p class="muted">No crop previews returned.</p>'}</div>
@@ -91,6 +101,9 @@ function renderResult(data, sourceLabel) {
     <ul class="feature-list">
       <li>Action Confidence Feature: ${features.action_confidence ?? "N/A"}</li>
       <li>Look Confidence Feature: ${features.look_confidence ?? "N/A"}</li>
+      <li>Mean Base Crossing Probability: ${features.mean_base_prob_crossing ?? "N/A"}</li>
+      <li>Mean Behavior-Aux Crossing Probability: ${features.mean_stage1_aux_prob_crossing ?? "N/A"}</li>
+      <li>Stage 2 Windows Analyzed: ${features.stage2_windows_analyzed ?? "N/A"}</li>
     </ul>
 
     <h3>Window Summaries</h3>
@@ -161,7 +174,7 @@ form.addEventListener("submit", async (event) => {
 
     setStatuses("done", "running");
     const data = await response.json();
-    setStatuses("done", data.stage2_risk.status === "pending" ? "pending" : "done");
+    setStatuses("done", data.stage2_risk.status === "completed" ? "done" : "waiting");
     renderResult(data, sourceLabel);
   } catch (error) {
     setStatuses("done", "done");

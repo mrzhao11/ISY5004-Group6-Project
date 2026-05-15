@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
+import pathlib
 from dataclasses import fields
 from pathlib import Path
 
@@ -36,8 +38,18 @@ def build_argparser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_checkpoint(checkpoint_path: Path, device: torch.device) -> dict:
+    # Team checkpoints may have been saved on Windows and can contain pathlib.WindowsPath.
+    if os.name != "nt":
+        pathlib.WindowsPath = pathlib.PosixPath
+    try:
+        return torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=device)
+
+
 def _load_model(checkpoint_path: Path, manifest_path: Path, device: torch.device) -> tuple[Stage2CrossingModel, DataConfig]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = _load_checkpoint(checkpoint_path, device)
     data_cfg = DataConfig(**checkpoint["data_config"])
     data_cfg.manifest_path = manifest_path
     allowed = {field.name for field in fields(ModelConfig)}

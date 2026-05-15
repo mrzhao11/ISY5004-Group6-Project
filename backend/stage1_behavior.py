@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from stage1_inference.infer_video import run_video_inference
+from stage1_inference.stage1 import run_video_inference
 
 from .schemas import BehaviorPrediction, BehaviorWindowPrediction, CropPreview
 
 
 class Stage1BehaviorRecognizer:
-    """Stage 1 raw-video behavior inference backed by stage1_inference.infer_video."""
+    """Stage 1 raw-video behavior inference backed by stage1_inference.stage1."""
 
     def predict(
         self,

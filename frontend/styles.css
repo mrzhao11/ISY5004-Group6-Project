@@ -325,11 +325,6 @@ button:hover {
   color: var(--ok);
 }
 
-.status.pending {
-  background: #edf2f8;
-  color: #536b86;
-}
-
 .muted {
   color: var(--muted);
 }
@@ -357,6 +352,14 @@ button:hover {
 
 .kpi strong {
   font-size: 1.02rem;
+}
+
+.risk-high {
+  color: #b42318;
+}
+
+.risk-low {
+  color: #12774f;
 }
 
 .feature-list {

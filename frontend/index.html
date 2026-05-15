@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Pedestrian Behavior Analysis</title>
-    <link rel="stylesheet" href="./styles.css?v=20260515-video-preview" />
+    <link rel="stylesheet" href="./styles.css?v=20260515-stage2-risk-view" />
   </head>
   <body>
     <div class="bg-layer" aria-hidden="true"></div>
@@ -23,8 +23,8 @@
           <p class="eyebrow">Two-Stage Decision Pipeline</p>
           <h1>Pedestrian Behavior and Crossing Risk Dashboard</h1>
           <p>
-            Upload a driving video, extract pedestrian evidence, infer behavior labels, and prepare the
-            feature interface for the future crossing-risk model.
+            Upload a driving video, extract pedestrian evidence, infer behavior labels, and estimate
+            crossing risk from tracked motion and behavior features.
           </p>
         </div>
         <div class="hero-metrics">
@@ -38,7 +38,7 @@
           </div>
           <div>
             <span>Output</span>
-            <strong>Labels + Crop Evidence</strong>
+            <strong>Labels + Risk Score</strong>
           </div>
         </div>
       </section>
@@ -88,7 +88,7 @@
           </article>
           <article>
             <h3>Crossing Risk</h3>
-            <p>Model Integration Pending</p>
+            <p>Trajectory + Behavior Fusion</p>
             <span id="stage2Status" class="status waiting">Waiting</span>
           </article>
         </div>
@@ -96,7 +96,7 @@
 
       <section class="results card" id="resultsPanel">
         <h2>Analysis Output</h2>
-        <p class="muted">Upload a video to generate pedestrian labels, crop evidence, and Stage 2 input features.</p>
+        <p class="muted">Upload a video to generate pedestrian labels, crop evidence, and crossing-risk predictions.</p>
       </section>
 
       <section class="actions card">
@@ -105,11 +105,11 @@
           <li>The system prioritizes the most consistent pedestrian track in the uploaded video.</li>
           <li>Visual crop evidence helps verify which pedestrian is being analyzed.</li>
           <li>Window-level behavior labels are aggregated into a stable behavior summary.</li>
-          <li>Structured Stage 1 results are saved for downstream crossing-risk analysis.</li>
+          <li>Stage 2 reads the saved Stage 1 trajectory windows to produce crossing-risk predictions.</li>
         </ul>
       </section>
     </main>
 
-    <script src="./app.js?v=20260515-video-preview"></script>
+    <script src="./app.js?v=20260515-stage2-risk-view"></script>
   </body>
 </html>
