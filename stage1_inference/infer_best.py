@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import pickle
+import os
+import pathlib
 from pathlib import Path
 
 import numpy as np
@@ -57,10 +58,14 @@ def build_argparser() -> argparse.ArgumentParser:
 def _load_checkpoint(path: Path, device: str) -> dict:
     import torch
 
+    # Team checkpoints were saved on Windows and may contain pathlib.WindowsPath.
+    # Docker/Linux cannot instantiate WindowsPath, so map it before unpickling.
+    if os.name != "nt":
+        pathlib.WindowsPath = pathlib.PosixPath
     try:
-        return torch.load(path, map_location=device)
-    except pickle.UnpicklingError:
         return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
 
 
 def _load_data_config(values: dict) -> DataConfig:

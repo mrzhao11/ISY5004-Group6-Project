@@ -4,6 +4,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: pedestrian_sensing_backend
+    environment:
+      AUTO_DOWNLOAD_STAGE1_WEIGHTS: "1"
     ports:
       - "8000:8000"
     volumes:
