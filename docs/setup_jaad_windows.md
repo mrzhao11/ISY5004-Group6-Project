@@ -13,7 +13,7 @@ Environment context assumed by this guide:
 
 - OS: Windows
 - shell: PowerShell
-- project path: `E:\文件\学习\硕士\项目三\ISY5004-Group6-Project`
+- project path: `ISY5004-Group6-Project` (relative to wherever you cloned the repository)
 
 Official references used for JAAD access:
 
@@ -42,7 +42,7 @@ conda activate isy5004-jaad
 ## 2. Enter the Project and Install Dependencies
 
 ```powershell
-cd "E:\文件\学习\硕士\项目三\ISY5004-Group6-Project"
+cd ISY5004-Group6-Project
 pip install -r requirements.txt
 pip install gdown
 conda install -c conda-forge ffmpeg -y
@@ -161,7 +161,7 @@ You can copy and run the following full workflow step by step:
 ```powershell
 conda create -n isy5004-jaad python=3.11 -y
 conda activate isy5004-jaad
-cd "E:\文件\学习\硕士\项目三\ISY5004-Group6-Project"
+cd ISY5004-Group6-Project
 pip install -r requirements.txt
 pip install gdown
 conda install -c conda-forge ffmpeg -y
