@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import pickle
 import tempfile
 from dataclasses import dataclass
@@ -106,6 +107,8 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
 
 
 def _detect_with_yolo(video_path: Path, yolo_model_path: Path, conf: float, iou_threshold: float) -> list[Detection]:
+    # Keep Ultralytics settings inside the project instead of depending on a user-profile path.
+    os.environ.setdefault("YOLO_CONFIG_DIR", str(Path("outputs") / "ultralytics"))
     try:
         import cv2
         from ultralytics import YOLO
