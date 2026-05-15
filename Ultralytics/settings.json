@@ -1,6 +1,6 @@
 {
   "settings_version": "0.0.6",
-  "datasets_dir": "D:\\Study_and_Work\\2026spring\\NUS\\courses\\ISY5004_Intelligent_Sensing_Systems\\Practice_Module\\project\\code\\ISY5004-Group6-Project\\datasets",
+  "datasets_dir": "datasets",
   "weights_dir": "weights",
   "runs_dir": "runs",
   "uuid": "18c996df1468732f4e7f636691175d239ec6a0d950c04294b30c399b571c60a8",
