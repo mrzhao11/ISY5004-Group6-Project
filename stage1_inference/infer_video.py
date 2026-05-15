@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import os
 import pickle
+import pathlib
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,10 +58,14 @@ def build_argparser() -> argparse.ArgumentParser:
 def _load_checkpoint(path: Path, device: str) -> dict:
     import torch
 
+    # Team checkpoints were saved on Windows and may contain pathlib.WindowsPath.
+    # Docker/Linux cannot instantiate WindowsPath, so map it before unpickling.
+    if os.name != "nt":
+        pathlib.WindowsPath = pathlib.PosixPath
     try:
-        return torch.load(path, map_location=device)
-    except pickle.UnpicklingError:
         return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
 
 
 def _load_data_config(values: dict) -> DataConfig:
@@ -216,6 +222,22 @@ def _uniform_select(paths: list[Path], count: int) -> list[Path]:
     return [paths[int(index)] for index in indices]
 
 
+def _encode_crop_previews(crops: list[TrackCrop], count: int) -> list[dict[str, object]]:
+    if count <= 0:
+        return []
+    selected = _uniform_select(crops, count)
+    previews: list[dict[str, object]] = []
+    for crop in selected:
+        encoded = base64.b64encode(crop.path.read_bytes()).decode("ascii")
+        previews.append(
+            {
+                "frame_id": crop.frame_id,
+                "image_data": f"data:image/jpeg;base64,{encoded}",
+            }
+        )
+    return previews
+
+
 def _load_clip_tensor(paths: list[Path], data_config: DataConfig, clip_length: int, device: str):
     import torch
 
@@ -285,6 +307,81 @@ def _predict_window(
     return row
 
 
+def run_video_inference(
+    *,
+    video_path: Path,
+    pedestrian_id: str | None = None,
+    detections_csv: Path | None = None,
+    yolo_model_path: Path | None = None,
+    output_path: Path | None = None,
+    action_checkpoint_path: Path = Path("models/stage1/action_sequence_swin3d_t.pt"),
+    look_checkpoint_path: Path = Path("models/stage1/look_frame_swin_t.pt"),
+    clip_length: int = 16,
+    window_stride: int = 8,
+    look_max_frames: int = 15,
+    det_conf: float = 0.35,
+    track_iou_threshold: float = 0.30,
+    device: str = "cuda",
+    crop_preview_count: int = 6,
+) -> pd.DataFrame:
+    if detections_csv is None and yolo_model_path is None:
+        raise ValueError("Provide either detections_csv or yolo_model_path for raw video inference")
+
+    action_checkpoint = _load_checkpoint(action_checkpoint_path, device)
+    look_checkpoint = _load_checkpoint(look_checkpoint_path, device)
+    detections = (
+        _read_detections_csv(detections_csv)
+        if detections_csv is not None
+        else _detect_with_yolo(video_path, yolo_model_path, det_conf, track_iou_threshold)
+    )
+    selected_pedestrian_id = _select_track(detections, pedestrian_id)
+
+    with tempfile.TemporaryDirectory(prefix="stage1_video_crops_") as tmp_dir:
+        crops = _crop_track_frames(video_path, detections, selected_pedestrian_id, Path(tmp_dir))
+        crop_previews = _encode_crop_previews(crops, crop_preview_count)
+        windows = _build_windows(crops, clip_length, window_stride)
+        args = argparse.Namespace(
+            clip_length=clip_length,
+            look_max_frames=look_max_frames,
+            device=device,
+        )
+        action_model, look_model, action_data_config, look_data_config = _load_models(
+            args,
+            action_checkpoint,
+            look_checkpoint,
+        )
+        rows = []
+        for window_index, window in enumerate(windows):
+            row = _predict_window(
+                [crop.path for crop in window],
+                args,
+                action_model,
+                look_model,
+                action_data_config,
+                look_data_config,
+            )
+            row.update(
+                {
+                    "video_path": str(video_path),
+                    "pedestrian_id": selected_pedestrian_id,
+                    "window_index": window_index,
+                    "start_frame": window[0].frame_id,
+                    "end_frame": window[-1].frame_id,
+                    "num_window_frames": len(window),
+                    "num_track_frames": len(crops),
+                }
+            )
+            rows.append(row)
+
+    output = pd.DataFrame(rows)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output.to_csv(output_path, index=False)
+        output.attrs["output_path"] = str(output_path)
+    output.attrs["crop_previews"] = crop_previews
+    return output
+
+
 def _load_models(args: argparse.Namespace, action_checkpoint: dict, look_checkpoint: dict):
     action_data_config = _load_data_config(action_checkpoint["data_config"])
     look_data_config = _load_data_config(look_checkpoint["data_config"])
@@ -304,52 +401,22 @@ def _load_models(args: argparse.Namespace, action_checkpoint: dict, look_checkpo
 
 def main() -> None:
     args = build_argparser().parse_args()
-    if args.detections_csv is None and args.yolo_model_path is None:
-        raise ValueError("Provide either --detections-csv or --yolo-model-path for raw video inference")
-
-    action_checkpoint = _load_checkpoint(args.action_checkpoint_path, args.device)
-    look_checkpoint = _load_checkpoint(args.look_checkpoint_path, args.device)
-    detections = (
-        _read_detections_csv(args.detections_csv)
-        if args.detections_csv is not None
-        else _detect_with_yolo(args.video_path, args.yolo_model_path, args.det_conf, args.track_iou_threshold)
+    output = run_video_inference(
+        video_path=args.video_path,
+        pedestrian_id=args.pedestrian_id,
+        detections_csv=args.detections_csv,
+        yolo_model_path=args.yolo_model_path,
+        output_path=args.output_path,
+        action_checkpoint_path=args.action_checkpoint_path,
+        look_checkpoint_path=args.look_checkpoint_path,
+        clip_length=args.clip_length,
+        window_stride=args.window_stride,
+        look_max_frames=args.look_max_frames,
+        det_conf=args.det_conf,
+        track_iou_threshold=args.track_iou_threshold,
+        device=args.device,
     )
-    pedestrian_id = _select_track(detections, args.pedestrian_id)
-
-    with tempfile.TemporaryDirectory(prefix="stage1_video_crops_") as tmp_dir:
-        crops = _crop_track_frames(args.video_path, detections, pedestrian_id, Path(tmp_dir))
-        windows = _build_windows(crops, args.clip_length, args.window_stride)
-        action_model, look_model, action_data_config, look_data_config = _load_models(
-            args,
-            action_checkpoint,
-            look_checkpoint,
-        )
-        rows = []
-        for window_index, window in enumerate(windows):
-            row = _predict_window(
-                [crop.path for crop in window],
-                args,
-                action_model,
-                look_model,
-                action_data_config,
-                look_data_config,
-            )
-            row.update(
-                {
-                    "video_path": str(args.video_path),
-                    "pedestrian_id": pedestrian_id,
-                    "window_index": window_index,
-                    "start_frame": window[0].frame_id,
-                    "end_frame": window[-1].frame_id,
-                    "num_window_frames": len(window),
-                    "num_track_frames": len(crops),
-                }
-            )
-            rows.append(row)
-
-    output = pd.DataFrame(rows)
-    args.output_path.parent.mkdir(parents=True, exist_ok=True)
-    output.to_csv(args.output_path, index=False)
+    pedestrian_id = str(output["pedestrian_id"].iloc[0]) if not output.empty else "unknown"
     print(f"exported={args.output_path}")
     print(f"pedestrian_id={pedestrian_id}")
     print(f"windows={len(output)}")
