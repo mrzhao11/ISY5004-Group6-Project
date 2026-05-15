@@ -1,4 +1,21 @@
 services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.08-py3
+    container_name: pedestrian_triton
+    ports:
+      - "8001:8000"   # HTTP inference
+      - "8002:8001"   # gRPC inference
+      - "8003:8002"   # metrics
+    volumes:
+      - ./triton/model_repository:/models
+    command: >
+      tritonserver
+      --model-repository=/models
+      --log-verbose=1
+      --strict-model-config=false
+    shm_size: "256m"
+    restart: unless-stopped
+
   backend:
     build:
       context: .
