@@ -1,6 +1,9 @@
 services:
   triton:
-    image: nvcr.io/nvidia/tritonserver:24.08-py3
+    build:
+      context: .
+      dockerfile: triton/Dockerfile
+    image: pedestrian_triton:local
     container_name: pedestrian_triton
     ports:
       - "8001:8000"   # HTTP inference
@@ -8,12 +11,19 @@ services:
       - "8003:8002"   # metrics
     volumes:
       - ./triton/model_repository:/models
+      - ./stage1_inference:/stage1_inference:ro
+      - ./stage2_inference:/stage2_inference:ro
+      - ./data:/data:ro
     command: >
       tritonserver
       --model-repository=/models
       --log-verbose=1
       --strict-model-config=false
-    shm_size: "256m"
+      --exit-on-error=false
+      --pinned-memory-pool-byte-size=0
+    environment:
+      - CUDA_VISIBLE_DEVICES=-1
+    shm_size: "4g"
     restart: unless-stopped
 
   backend:

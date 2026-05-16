@@ -1,0 +1,51 @@
+name: "stage2_crossing"
+backend: "python"
+max_batch_size: 0
+
+input [
+  {
+    name: "traj_features"
+    data_type: TYPE_FP32
+    dims: [-1, 16, 6]
+  },
+  {
+    name: "behavior_probs"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+  },
+  {
+    name: "behavior_embedding"
+    data_type: TYPE_FP32
+    dims: [-1, 256]
+  },
+  {
+    name: "context_features"
+    data_type: TYPE_FP32
+    dims: [-1, 6]
+  },
+  {
+    name: "vehicle_features"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+  }
+]
+
+output [
+  {
+    name: "crossing_prob"
+    data_type: TYPE_FP32
+    dims: [-1, 1]
+  },
+  {
+    name: "risk_level"
+    data_type: TYPE_INT32
+    dims: [-1, 1]
+  }
+]
+
+instance_group [{ kind: KIND_CPU }]
+
+optimization {
+  input_pinned_memory  { enable: false }
+  output_pinned_memory { enable: false }
+}

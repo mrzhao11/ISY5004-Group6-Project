@@ -1,0 +1,33 @@
+name: "stage1_behavior"
+backend: "python"
+max_batch_size: 0
+
+input [
+  {
+    name: "ped_clip"
+    data_type: TYPE_FP32
+    dims: [-1, 16, 224, 224, 3]
+  }
+]
+
+# behavior_probs: [walking, standing, looking, waiting]
+# behavior_embedding: 256-dim feature vector passed to Stage 2
+output [
+  {
+    name: "behavior_probs"
+    data_type: TYPE_FP32
+    dims: [-1, 4]
+  },
+  {
+    name: "behavior_embedding"
+    data_type: TYPE_FP32
+    dims: [-1, 256]
+  }
+]
+
+instance_group [{ kind: KIND_CPU }]
+
+optimization {
+  input_pinned_memory  { enable: false }
+  output_pinned_memory { enable: false }
+}
